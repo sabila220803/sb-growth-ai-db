@@ -3,6 +3,7 @@ import mediapipe as mp
 import numpy as np
 from flask import Flask, request, jsonify
 import base64
+import math
 
 app = Flask(__name__)
 
@@ -16,7 +17,6 @@ def detect_a4_paper(image):
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, 50, 150)
     
-    # Dilate agar garis putus-putus menyambung
     kernel = np.ones((5,5), np.uint8)
     edges = cv2.dilate(edges, kernel, iterations=1)
 
@@ -36,9 +36,74 @@ def detect_a4_paper(image):
 
     return largest_contour
 
+# --- FUNGSI BARU: HITUNG JARAK EUCLIDEAN ---
+def calculate_distance(point1, point2):
+    return math.sqrt((point2[0] - point1[0])**2 + (point2[1] - point1[1])**2)
+
+# --- FUNGSI BARU: ALGORITMA SEGMENTED HEIGHT ---
+def get_segmented_height(landmarks, width, height, debug_image):
+    # Ambil koordinat landmark penting
+    # 0: Nose, 11/12: Shoulders, 23/24: Hips, 25/26: Knees, 27/28: Ankles
+    
+    def get_coords(landmark_idx):
+        return (int(landmarks[landmark_idx].x * width), int(landmarks[landmark_idx].y * height))
+
+    nose = get_coords(0)
+    
+    shoulder_l = get_coords(11)
+    shoulder_r = get_coords(12)
+    mid_shoulder = (int((shoulder_l[0]+shoulder_r[0])/2), int((shoulder_l[1]+shoulder_r[1])/2))
+    
+    hip_l = get_coords(23)
+    hip_r = get_coords(24)
+    mid_hip = (int((hip_l[0]+hip_r[0])/2), int((hip_l[1]+hip_r[1])/2))
+    
+    knee_l = get_coords(25)
+    knee_r = get_coords(26)
+    mid_knee = (int((knee_l[0]+knee_r[0])/2), int((knee_l[1]+knee_r[1])/2))
+    
+    ankle_l = get_coords(27)
+    ankle_r = get_coords(28)
+    mid_ankle = (int((ankle_l[0]+ankle_r[0])/2), int((ankle_l[1]+ankle_r[1])/2))
+
+    # --- PERHITUNGAN SEGMEN TULANG ---
+    
+    # 1. Kepala (Estimasi dari Hidung ke Bahu Tengah x Faktor Koreksi Kepala)
+    # Faktor 1.6 - 1.8 biasanya digunakan untuk estimasi puncak kepala dari hidung
+    dist_head = calculate_distance(nose, mid_shoulder) * 1.5
+    
+    # 2. Torso (Bahu Tengah ke Pinggul Tengah) - Tulang Belakang
+    dist_torso = calculate_distance(mid_shoulder, mid_hip)
+    
+    # 3. Paha (Pinggul Tengah ke Lutut Tengah) - Femur
+    # Menggunakan rata-rata kiri kanan untuk stabilitas
+    dist_thigh_l = calculate_distance(hip_l, knee_l)
+    dist_thigh_r = calculate_distance(hip_r, knee_r)
+    dist_thigh = (dist_thigh_l + dist_thigh_r) / 2
+    
+    # 4. Betis (Lutut Tengah ke Pergelangan Kaki Tengah) - Tibia
+    dist_shin_l = calculate_distance(knee_l, ankle_l)
+    dist_shin_r = calculate_distance(knee_r, ankle_r)
+    dist_shin = (dist_shin_l + dist_shin_r) / 2
+
+    # Total Tinggi dalam PIKSEL
+    total_height_px = dist_head + dist_torso + dist_thigh + dist_shin
+
+    # --- VISUALISASI DEBUG (ALUR PENGUKURAN) ---
+    # Gambar garis segmen yang dihitung (Warna Cyan)
+    cv2.line(debug_image, mid_shoulder, mid_hip, (255, 255, 0), 4) # Torso
+    cv2.line(debug_image, mid_hip, mid_knee, (255, 255, 0), 4)     # Paha
+    cv2.line(debug_image, mid_knee, mid_ankle, (255, 255, 0), 4)   # Betis
+    
+    # Garis Kepala (Putus-putus simulasi)
+    top_head_est = (mid_shoulder[0], int(mid_shoulder[1] - dist_head))
+    cv2.line(debug_image, mid_shoulder, top_head_est, (0, 255, 255), 2)
+    
+    return total_height_px
+
 @app.route('/', methods=['GET'])
 def home():
-    return "AI Service (With Debug Visualizer) Ready."
+    return "AI Service (Segmented Skeleton Algorithm) Ready."
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -52,10 +117,10 @@ def predict():
     # Copy gambar untuk dicoret-coret (Debug View)
     debug_image = image.copy()
 
-    # --- 1. DETEKSI KERTAS ---
+    # --- 1. DETEKSI KERTAS A4 (KALIBRASI) ---
     a4_contour = detect_a4_paper(image)
     if a4_contour is None:
-        return jsonify({"error": "Gagal: Kertas A4 tidak ditemukan."}), 400
+        return jsonify({"error": "Gagal: Kertas A4 tidak ditemukan. Pastikan kertas terlihat jelas."}), 400
 
     # GAMBAR KOTAK DI KERTAS (Warna Hijau)
     cv2.drawContours(debug_image, [a4_contour], -1, (0, 255, 0), 3)
@@ -67,46 +132,35 @@ def predict():
     A4_REAL_HEIGHT_CM = 29.7
     pixel_per_cm = paper_pixel_len / A4_REAL_HEIGHT_CM
 
-    # --- 2. DETEKSI TUBUH ---
+    # --- 2. DETEKSI TUBUH & HITUNG TINGGI (METODE BARU) ---
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = pose.process(image_rgb)
 
     if not results.pose_landmarks:
         return jsonify({"error": "Gagal: Tubuh tidak terdeteksi."}), 400
 
-    # GAMBAR RANGKA TUBUH (Warna Merah)
+    # Gambar Skeleton Standar MediaPipe (Merah)
     mp_drawing.draw_landmarks(
         debug_image, 
         results.pose_landmarks, 
         mp_pose.POSE_CONNECTIONS,
-        mp_drawing.DrawingSpec(color=(0,0,255), thickness=2, circle_radius=2),
-        mp_drawing.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2)
+        mp_drawing.DrawingSpec(color=(0,0,255), thickness=1, circle_radius=1),
+        mp_drawing.DrawingSpec(color=(0,255,0), thickness=1, circle_radius=1)
     )
 
-    landmarks = results.pose_landmarks.landmark
     h_img, w_img, _ = image.shape
+    
+    # PANGGIL FUNGSI BARU DI SINI
+    height_px = get_segmented_height(results.pose_landmarks.landmark, w_img, h_img, debug_image)
+    
+    # Konversi ke CM
+    body_height_cm = height_px / pixel_per_cm
 
-    y_eye = (landmarks[mp_pose.PoseLandmark.LEFT_EYE.value].y + landmarks[mp_pose.PoseLandmark.RIGHT_EYE.value].y) / 2
-    y_heel = (landmarks[mp_pose.PoseLandmark.LEFT_HEEL.value].y + landmarks[mp_pose.PoseLandmark.RIGHT_HEEL.value].y) / 2
+    # Tulis Hasil di Gambar Debug
+    cv2.putText(debug_image, f"Tinggi: {round(body_height_cm, 1)} cm", (50, 50), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0), 3)
 
-    y_eye_px = int(y_eye * h_img)
-    y_heel_px = int(y_heel * h_img)
-    top_head_px = int(y_eye_px - (h_img * 0.05))
-
-    # GAMBAR GARIS TINGGI BADAN (Warna Biru)
-    # Garis dari Kepala ke Kaki
-    cv2.line(debug_image, (int(w_img/2), top_head_px), (int(w_img/2), y_heel_px), (255, 0, 0), 4)
-    # Garis batas atas (Kepala)
-    cv2.line(debug_image, (int(w_img/2)-50, top_head_px), (int(w_img/2)+50, top_head_px), (255, 0, 0), 2)
-    # Garis batas bawah (Kaki)
-    cv2.line(debug_image, (int(w_img/2)-50, y_heel_px), (int(w_img/2)+50, y_heel_px), (255, 0, 0), 2)
-
-    # Hitung Tinggi
-    body_height_px = abs(y_heel_px - top_head_px)
-    body_height_cm = body_height_px / pixel_per_cm
-
-    # --- 3. KONVERSI GAMBAR DEBUG JADI TEKS (BASE64) ---
-    # Agar bisa dikirim balik ke Laravel lewat JSON
+    # --- 3. KONVERSI GAMBAR DEBUG JADI BASE64 ---
     _, buffer = cv2.imencode('.jpg', debug_image)
     debug_image_base64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -114,7 +168,7 @@ def predict():
         "status": "success",
         "pesan": "Berhasil",
         "tinggi_badan": round(body_height_cm, 2),
-        "debug_image": debug_image_base64  # Ini data gambarnya
+        "debug_image": debug_image_base64
     })
 
 if __name__ == '__main__':

@@ -124,4 +124,18 @@ class GrowthController extends Controller
         }
         return $arr[$closest];
     }
+
+    // Fungsi untuk menyimpan validasi manual
+    public function updateManual(Request $request, $id)
+    {
+        $request->validate([
+            'manual_height' => 'required|numeric|min:10|max:200',
+        ]);
+
+        $measurement = \App\Models\Measurement::findOrFail($id);
+        $measurement->manual_height = $request->manual_height;
+        $measurement->save();
+
+        return back()->with('success', 'Data validasi berhasil disimpan!');
+    }
 }

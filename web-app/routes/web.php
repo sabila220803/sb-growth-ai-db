@@ -43,6 +43,9 @@ Route::middleware('auth')->group(function () {
     // 3. Fitur Cek Stunting (AI)
     Route::get('/cek-stunting', [GrowthController::class, 'index'])->name('growth.index');
     Route::post('/analyze', [GrowthController::class, 'process'])->name('analyze.image');
+
+    // Simpan Validasi Manual
+    Route::put('/measurements/{id}/validasi', [GrowthController::class, 'updateManual'])->name('measurements.update_manual');
 });
 
 require __DIR__.'/auth.php';

@@ -15,10 +15,14 @@ class Measurement extends Model
         'age_months',    // Umur saat diukur
         'height',        // Tinggi badan
         'weight',        // Berat badan
+        'manual_height',
         'status_height', // Status Stunting (Normal/Pendek)
         'status_weight', // Status Gizi (Normal/Kurang)
         'photo_path',    // Lokasi file foto
     ];
+
+
+    
 
     // Relasi ke Tabel Anak (Setiap pengukuran milik satu anak)
     public function child()
